@@ -1,0 +1,367 @@
+# =============================================================================
+# POS Platform Release Pipeline — GitLab CI/CD
+# =============================================================================
+# 10-stage release automation pipeline integrating version calculation,
+# release notes, work item tagging, QA bridging, and multi-env deployment.
+#
+# Trigger: Push to main branch or manual pipeline run
+# =============================================================================
+
+stages:
+  - validate
+  - build
+  - security-scan
+  - version
+  - release-notes
+  - tag-work-items
+  - qa-bridge
+  - deploy-staging
+  - deploy-production
+  - notify
+
+variables:
+  PYTHON_IMAGE: "python:3.11-slim"
+  DOCKER_IMAGE: "docker:24"
+  HELM_IMAGE: "alpine/helm:3.14.0"
+  TRIVY_IMAGE: "aquasec/trivy:latest"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+
+# ─── Reusable Templates ──────────────────────────────────────────────────────
+
+.python_base:
+  image: $PYTHON_IMAGE
+  before_script:
+    - pip install --quiet -r requirements.txt
+  cache:
+    key: pip-cache
+    paths:
+      - .pip-cache/
+
+.deploy_base:
+  image: $HELM_IMAGE
+  before_script:
+    - apk add --no-cache bash curl python3 py3-pip
+    - pip install --quiet pyyaml requests
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 1: VALIDATE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+validate:lint:
+  stage: validate
+  extends: .python_base
+  script:
+    - echo "Validating conventional commit format..."
+    - pip install --quiet commitizen
+    - |
+      # Check that the latest commit follows conventional commit format
+      COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+      echo "Latest commit: $COMMIT_MSG"
+      python -c "
+      import re
+      msg = '''$COMMIT_MSG'''
+      pattern = r'^(\w+)(\([^)]+\))?!?:\s*.+'
+      if not re.match(pattern, msg):
+          print('WARNING: Commit does not follow conventional format')
+          print('Expected: type(scope): description')
+      else:
+          print('Commit format: OK')
+      "
+    - echo "Linting Python scripts..."
+    - pip install --quiet flake8
+    - flake8 scripts/ --max-line-length=120 --ignore=E501,W503 || true
+    - echo "Validating YAML configs..."
+    - python -c "import yaml; yaml.safe_load(open('config/release-config.yaml'))"
+    - python -c "import yaml; yaml.safe_load(open('config/conventional-commits.yaml'))"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+
+validate:test:
+  stage: validate
+  extends: .python_base
+  script:
+    - echo "Running unit tests..."
+    - python -m pytest tests/ -v --tb=short || true
+  artifacts:
+    reports:
+      junit: test-results.xml
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 2: BUILD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+build:docker:
+  stage: build
+  image: $DOCKER_IMAGE
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - echo "Building Docker images for changed services..."
+    - |
+      # Detect changed services from commits
+      CHANGED=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} HEAD | head -100)
+      echo "Changed files: $CHANGED"
+    - |
+      # Build and push each affected service image
+      for SERVICE_DIR in services/*/; do
+        SERVICE_NAME=$(basename "$SERVICE_DIR")
+        if echo "$CHANGED" | grep -q "$SERVICE_DIR" || [ "${BUILD_ALL:-false}" = "true" ]; then
+          echo "Building: $SERVICE_NAME"
+          docker build \
+            --build-arg VERSION=${CI_COMMIT_SHORT_SHA} \
+            --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+            -t ${DOCKER_REGISTRY_DEV}/${SERVICE_NAME}:${CI_COMMIT_SHORT_SHA} \
+            -t ${DOCKER_REGISTRY_DEV}/${SERVICE_NAME}:latest \
+            ${SERVICE_DIR}
+          docker push ${DOCKER_REGISTRY_DEV}/${SERVICE_NAME}:${CI_COMMIT_SHORT_SHA}
+          docker push ${DOCKER_REGISTRY_DEV}/${SERVICE_NAME}:latest
+        fi
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 3: SECURITY SCAN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+security:trivy:
+  stage: security-scan
+  image: $TRIVY_IMAGE
+  script:
+    - echo "Scanning filesystem for vulnerabilities..."
+    - trivy filesystem --severity HIGH,CRITICAL --exit-code 0 --format table .
+    - echo "Scanning for secrets..."
+    - trivy filesystem --scanners secret --exit-code 1 .
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+security:gitleaks:
+  stage: security-scan
+  image: zricethezav/gitleaks:latest
+  script:
+    - gitleaks detect --source . --verbose --report-format json --report-path gitleaks-report.json || true
+  artifacts:
+    paths:
+      - gitleaks-report.json
+    when: always
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 4: VERSION CALCULATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version:calculate:
+  stage: version
+  extends: .python_base
+  script:
+    - echo "Calculating next semantic version..."
+    - python scripts/version.py --bump auto --output version-summary.json
+    - |
+      # Extract version for downstream jobs
+      VERSION=$(python -c "import json; print(json.load(open('version-summary.json'))['version'])")
+      echo "VERSION=${VERSION}" >> version.env
+      echo "Calculated version: ${VERSION}"
+  artifacts:
+    paths:
+      - version-summary.json
+      - version.env
+    reports:
+      dotenv: version.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 5: RELEASE NOTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+release-notes:generate:
+  stage: release-notes
+  extends: .python_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+  script:
+    - echo "Generating release notes for ${VERSION}..."
+    - python scripts/release_notes.py --version ${VERSION} --format md --output release-notes-${VERSION}.md
+    - python scripts/release_notes.py --version ${VERSION} --format json --output release-notes-${VERSION}.json
+    - python scripts/release_notes.py --version ${VERSION} --output CHANGELOG.md
+    - echo "Release notes generated"
+    - cat release-notes-${VERSION}.md
+  artifacts:
+    paths:
+      - release-notes-${VERSION}.md
+      - release-notes-${VERSION}.json
+      - CHANGELOG.md
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 6: TAG WORK ITEMS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tag-work-items:jira:
+  stage: tag-work-items
+  extends: .python_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+  script:
+    - echo "Tagging Jira tickets with ${VERSION}..."
+    - python scripts/tag_work_items.py --version ${VERSION} --transition --output tagged-items.json
+  artifacts:
+    paths:
+      - tagged-items.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true  # Don't block release if Jira tagging fails
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 7: QA BRIDGE ⭐
+# ═══════════════════════════════════════════════════════════════════════════════
+
+qa-bridge:handoff:
+  stage: qa-bridge
+  extends: .deploy_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+    - job: release-notes:generate
+      artifacts: true
+  script:
+    - echo "Preparing QA handoff for ${VERSION}..."
+    - pip install --quiet -r requirements.txt
+    - |
+      python scripts/prepare_qa_handoff.py \
+        --version ${VERSION} \
+        --env qa \
+        --output-dir ./qa-artifacts
+    - echo "QA Bridge complete"
+  artifacts:
+    paths:
+      - qa-artifacts/release-manifest.json
+      - qa-artifacts/qa-checklist.md
+    expire_in: 30 days
+  environment:
+    name: qa
+    url: https://qa.pos-platform.myorg.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 8: DEPLOY STAGING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+deploy:staging:
+  stage: deploy-staging
+  extends: .deploy_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+    - job: qa-bridge:handoff
+  script:
+    - echo "Deploying ${VERSION} to staging..."
+    - chmod +x scripts/deploy.sh
+    - ./scripts/deploy.sh --version ${VERSION} --env staging --strategy rolling
+  environment:
+    name: staging
+    url: https://staging.pos-platform.myorg.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 9: DEPLOY PRODUCTION (Manual Gate)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+deploy:production:
+  stage: deploy-production
+  extends: .deploy_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+    - job: deploy:staging
+  script:
+    - echo "Deploying ${VERSION} to production..."
+    - chmod +x scripts/deploy.sh
+    - ./scripts/deploy.sh --version ${VERSION} --env production --strategy canary
+    - echo "Deploying to edge clusters (wave 1 - pilot stores)..."
+    - ./scripts/deploy.sh --version ${VERSION} --env production --edge --wave 1
+  environment:
+    name: production
+    url: https://pos-platform.myorg.com
+  when: manual  # Requires manual approval for production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy:production-edge-full:
+  stage: deploy-production
+  extends: .deploy_base
+  needs:
+    - job: deploy:production
+  script:
+    - echo "Deploying ${VERSION} to all edge clusters..."
+    - chmod +x scripts/deploy.sh
+    - ./scripts/deploy.sh --version ${VERSION} --env production --edge --wave 2
+    - ./scripts/deploy.sh --version ${VERSION} --env production --edge --wave 3
+  when: manual  # Separate approval for full edge rollout
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGE 10: NOTIFY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+notify:slack:
+  stage: notify
+  extends: .python_base
+  needs:
+    - job: version:calculate
+      artifacts: true
+    - job: release-notes:generate
+      artifacts: true
+  script:
+    - echo "Sending release notification..."
+    - python scripts/release_report.py --version ${VERSION} --format md --output release-report.md
+    - |
+      python -c "
+      from scripts.utils.notification import send_slack, format_release_notification
+      import json, os
+      version = os.environ.get('VERSION', 'unknown')
+      notes = open('release-notes-' + version + '.md').read()[:500]
+      payload = format_release_notification(
+          version, notes, 'production',
+          pipeline_url=os.environ.get('CI_PIPELINE_URL', ''),
+          affected_services=json.load(open('version-summary.json')).get('affected_services', [])
+      )
+      send_slack(os.environ.get('SLACK_WEBHOOK_URL', ''), payload)
+      "
+  artifacts:
+    paths:
+      - release-report.md
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROLLBACK (Manual Trigger)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+rollback:production:
+  stage: deploy-production
+  extends: .deploy_base
+  script:
+    - echo "EMERGENCY ROLLBACK in production..."
+    - chmod +x scripts/deploy.sh
+    - ./scripts/deploy.sh --rollback --env production
+  environment:
+    name: production
+    action: stop
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

@@ -1,0 +1,97 @@
+# =============================================================================
+# Harness Service Definition — POS Platform
+# =============================================================================
+# Defines the POS platform service for Harness CD, including artifact
+# sources, manifests, and configuration overrides.
+# =============================================================================
+
+service:
+  name: POS Platform Service
+  identifier: pos_platform_service
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  description: "POS Platform microservice — deployed to cloud and edge K8s clusters"
+  tags:
+    team: platform-engineering
+    tier: critical
+
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      # ── Artifact Configuration ─────────────────────────────────────────────
+      artifacts:
+        primary:
+          primaryArtifactRef: pos_service_image
+          sources:
+            - identifier: pos_service_image
+              type: DockerRegistry
+              spec:
+                connectorRef: docker_registry_prod
+                imagePath: pos-platform/pos-service
+                tag: <+input>
+
+        sidecars:
+          - sidecar:
+              identifier: dynatrace_oneagent
+              type: DockerRegistry
+              spec:
+                connectorRef: docker_registry_prod
+                imagePath: dynatrace/oneagent
+                tag: latest
+
+      # ── Manifest Configuration ─────────────────────────────────────────────
+      manifests:
+        - manifest:
+            identifier: pos_helm_chart
+            type: HelmChart
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github_connector
+                  repoName: pos-platform
+                  branch: main
+                  folderPath: charts/pos-platform
+              chartName: pos-platform
+              chartVersion: <+input>
+              helmVersion: V3
+              skipResourceVersioning: false
+
+        - manifest:
+            identifier: values_override
+            type: Values
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github_connector
+                  repoName: release-toolkit
+                  branch: main
+                  folderPath: k8s/helm-values
+              # File selected per environment in environment.yaml
+
+      # ── Config Files ───────────────────────────────────────────────────────
+      configFiles:
+        - configFile:
+            identifier: release_config
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github_connector
+                  repoName: release-toolkit
+                  branch: main
+                  paths:
+                    - config/release-config.yaml
+
+      # ── Variables ──────────────────────────────────────────────────────────
+      variables:
+        - name: app_port
+          type: String
+          value: "8080"
+        - name: metrics_port
+          type: String
+          value: "9090"
+        - name: health_path
+          type: String
+          value: "/health/ready"

@@ -1,0 +1,345 @@
+# =============================================================================
+# Harness CD Pipeline Definition — POS Platform Release
+# =============================================================================
+# Multi-stage pipeline: Build → Security → QA Bridge → Staging → Production
+# with approval gates, rollback on failure, and edge cluster deployment.
+#
+# Import into Harness via: Project Settings → Pipelines → Import from YAML
+# =============================================================================
+
+pipeline:
+  name: POS Platform Release
+  identifier: pos_platform_release
+  projectIdentifier: pos_platform
+  orgIdentifier: retail_engineering
+  tags:
+    release-toolkit: "true"
+    team: platform-engineering
+
+  properties:
+    ci:
+      codebase:
+        connectorRef: github_connector
+        repoName: pos-platform
+        build:
+          type: branch
+          spec:
+            branch: main
+
+  variables:
+    - name: version
+      type: String
+      description: "Release version (e.g., v2.1.0)"
+      required: true
+    - name: bump_type
+      type: String
+      description: "Version bump type"
+      default: "auto"
+      required: false
+    - name: dry_run
+      type: String
+      description: "Dry run mode (true/false)"
+      default: "false"
+      required: false
+
+  stages:
+    # ── Stage 1: Build & Validate ────────────────────────────────────────────
+    - stage:
+        name: Build and Validate
+        identifier: build_validate
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: k8s_build_cluster
+              namespace: harness-builds
+          execution:
+            steps:
+              - step:
+                  name: Install Dependencies
+                  identifier: install_deps
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: python:3.11-slim
+                    command: pip install -r requirements.txt
+
+              - step:
+                  name: Lint
+                  identifier: lint
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: python:3.11-slim
+                    command: |
+                      pip install flake8
+                      flake8 scripts/ --max-line-length=120 --ignore=E501,W503
+
+              - step:
+                  name: Unit Tests
+                  identifier: unit_tests
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: python:3.11-slim
+                    command: python -m pytest tests/ -v --tb=short --junitxml=test-results.xml
+                    reports:
+                      type: JUnit
+                      spec:
+                        paths:
+                          - test-results.xml
+
+              - step:
+                  name: Calculate Version
+                  identifier: calculate_version
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: python:3.11-slim
+                    command: |
+                      python scripts/version.py --bump <+pipeline.variables.bump_type> --output version-summary.json
+                      VERSION=$(python -c "import json; print(json.load(open('version-summary.json'))['version'])")
+                      echo "Calculated version: $VERSION"
+                    outputVariables:
+                      - name: VERSION
+                        type: String
+                        value: VERSION
+
+    # ── Stage 2: Security Scan ───────────────────────────────────────────────
+    - stage:
+        name: Security Scan
+        identifier: security_scan
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: k8s_build_cluster
+              namespace: harness-builds
+          execution:
+            steps:
+              - step:
+                  name: Trivy Scan
+                  identifier: trivy_scan
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: aquasec/trivy:latest
+                    command: |
+                      trivy filesystem --severity HIGH,CRITICAL --exit-code 0 --format table .
+                      trivy filesystem --scanners secret --exit-code 1 .
+
+    # ── Stage 3: QA Bridge ───────────────────────────────────────────────────
+    - stage:
+        name: QA Bridge
+        identifier: qa_bridge
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: pos_platform_service
+          environment:
+            environmentRef: qa
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: qa_k8s
+          execution:
+            steps:
+              - step:
+                  name: Deploy to QA
+                  identifier: deploy_qa
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: true
+
+              - step:
+                  name: QA Handoff
+                  identifier: qa_handoff
+                  type: Run
+                  spec:
+                    connectorRef: dockerhub
+                    image: python:3.11-slim
+                    command: |
+                      pip install -r requirements.txt
+                      python scripts/prepare_qa_handoff.py \
+                        --version <+pipeline.stages.build_validate.spec.execution.steps.calculate_version.output.outputVariables.VERSION> \
+                        --env qa \
+                        --output-dir ./qa-artifacts
+
+              - step:
+                  name: Verify QA Health
+                  identifier: verify_qa
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: true
+            rollbackSteps:
+              - step:
+                  name: QA Rollback
+                  identifier: qa_rollback
+                  type: K8sRollingRollback
+                  spec: {}
+
+    # ── Stage 4: Approval Gate ───────────────────────────────────────────────
+    - stage:
+        name: Production Approval
+        identifier: prod_approval
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Approve Production Deploy
+                  identifier: approve_prod
+                  type: HarnessApproval
+                  spec:
+                    approvalMessage: |
+                      Release is ready for production deployment.
+                      Version: <+pipeline.variables.version>
+                      Please review QA results and approve.
+                    approvers:
+                      userGroups:
+                        - release_managers
+                        - engineering_leads
+                      minimumCount: 1
+                    approverInputs:
+                      - name: release_verified
+                        defaultValue: "false"
+
+    # ── Stage 5: Deploy Staging ──────────────────────────────────────────────
+    - stage:
+        name: Deploy Staging
+        identifier: deploy_staging
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: pos_platform_service
+          environment:
+            environmentRef: staging
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: staging_k8s
+          execution:
+            steps:
+              - step:
+                  name: Staging Deploy
+                  identifier: staging_deploy
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: true
+
+              - step:
+                  name: Health Check
+                  identifier: staging_health
+                  type: Http
+                  spec:
+                    url: https://staging.pos-platform.myorg.com/health/ready
+                    method: GET
+                    assertion: <+httpResponseCode> == 200
+                    headers: []
+                  timeout: 120s
+            rollbackSteps:
+              - step:
+                  name: Staging Rollback
+                  identifier: staging_rollback
+                  type: K8sRollingRollback
+                  spec: {}
+
+    # ── Stage 6: Deploy Production ───────────────────────────────────────────
+    - stage:
+        name: Deploy Production
+        identifier: deploy_production
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: pos_platform_service
+          environment:
+            environmentRef: production
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: prod_k8s
+          execution:
+            steps:
+              - step:
+                  name: Canary Deploy (10%)
+                  identifier: canary_deploy
+                  type: K8sCanaryDeploy
+                  spec:
+                    instanceSelection:
+                      type: Count
+                      spec:
+                        count: 1
+                    skipDryRun: false
+
+              - step:
+                  name: Canary Verification
+                  identifier: canary_verify
+                  type: Verify
+                  spec:
+                    type: Canary
+                    monitoredService:
+                      type: Default
+                    spec:
+                      sensitivity: HIGH
+                      duration: 5m
+                  timeout: 10m
+
+              - step:
+                  name: Full Rollout
+                  identifier: full_rollout
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: true
+
+              - step:
+                  name: Cleanup Canary
+                  identifier: canary_cleanup
+                  type: K8sCanaryDelete
+                  spec: {}
+            rollbackSteps:
+              - step:
+                  name: Production Rollback
+                  identifier: prod_rollback
+                  type: K8sRollingRollback
+                  spec: {}
+
+    # ── Stage 7: Notify ──────────────────────────────────────────────────────
+    - stage:
+        name: Notify
+        identifier: notify
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Slack Notification
+                  identifier: slack_notify
+                  type: Http
+                  spec:
+                    url: <+pipeline.variables.slack_webhook_url>
+                    method: POST
+                    headers:
+                      - key: Content-Type
+                        value: application/json
+                    requestBody: |
+                      {
+                        "text": "Release <+pipeline.variables.version> deployed to production successfully."
+                      }
+                  timeout: 30s
+
+  notificationRules:
+    - name: Pipeline Failure
+      identifier: pipeline_failure
+      pipelineEvents:
+        - type: PipelineFailed
+      notificationMethod:
+        type: Slack
+        spec:
+          webhookUrl: <+pipeline.variables.slack_webhook_url>

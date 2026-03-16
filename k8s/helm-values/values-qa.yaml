@@ -1,0 +1,95 @@
+# =============================================================================
+# Helm Values — QA Environment
+# =============================================================================
+# Dedicated QA environment for test automation. Monitoring enabled,
+# debug logging available, test data seeding support.
+
+global:
+  environment: qa
+  version: "0.0.0"
+  imageRegistry: "registry.staging.myorg.com"
+
+replicaCount: 2
+
+image:
+  repository: pos-platform/pos-service
+  tag: "0.0.0"
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: qa.pos-platform.myorg.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: pos-qa-tls
+      hosts:
+        - qa.pos-platform.myorg.com
+
+env:
+  - name: APP_ENV
+    value: "qa"
+  - name: LOG_LEVEL
+    value: "debug"
+  - name: DB_HOST
+    valueFrom:
+      secretKeyRef:
+        name: pos-db-credentials
+        key: host
+  - name: TEST_MODE
+    value: "true"
+  - name: SEED_TEST_DATA
+    value: "true"
+
+featureToggles:
+  enabled: true
+  sdkKey: "sdk-qa-placeholder"
+
+monitoring:
+  enabled: true
+  dynatrace:
+    enabled: true
+    injectAgent: true
+  prometheus:
+    scrape: true
+    port: 9090
+
+autoscaling:
+  enabled: false
+
+# QA-specific: allow test data reset endpoint
+testEndpoints:
+  enabled: true
+  resetData: true
+  mockExternalServices: true
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 10

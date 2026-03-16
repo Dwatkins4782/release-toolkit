@@ -1,0 +1,158 @@
+# =============================================================================
+# Harness Triggers — POS Platform Release
+# =============================================================================
+# Automatic pipeline triggers: on Git tag push, on merge to main,
+# and scheduled nightly builds.
+# =============================================================================
+
+---
+# ── Trigger: On Version Tag Push ─────────────────────────────────────────────
+trigger:
+  name: On Version Tag
+  identifier: on_version_tag
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  pipelineIdentifier: pos_platform_release
+  description: "Triggers full release pipeline when a semver tag is pushed"
+  enabled: true
+  tags:
+    type: release
+
+  source:
+    type: Webhook
+    spec:
+      type: Github
+      spec:
+        type: Push
+        spec:
+          connectorRef: github_connector
+          repoName: pos-platform
+          actions: []
+          payloadConditions:
+            - key: <+trigger.payload.ref>
+              operator: StartsWith
+              value: refs/tags/v
+
+  inputYaml: |
+    pipeline:
+      variables:
+        - name: version
+          type: String
+          value: <+trigger.payload.ref>
+        - name: bump_type
+          type: String
+          value: "auto"
+        - name: dry_run
+          type: String
+          value: "false"
+
+---
+# ── Trigger: On Merge to Main ────────────────────────────────────────────────
+trigger:
+  name: On Merge to Main
+  identifier: on_merge_main
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  pipelineIdentifier: pos_platform_release
+  description: "Triggers build + QA bridge on merge to main branch"
+  enabled: true
+  tags:
+    type: ci
+
+  source:
+    type: Webhook
+    spec:
+      type: Github
+      spec:
+        type: PullRequest
+        spec:
+          connectorRef: github_connector
+          repoName: pos-platform
+          actions:
+            - Closed
+          payloadConditions:
+            - key: <+trigger.payload.pull_request.merged>
+              operator: Equals
+              value: "true"
+            - key: <+trigger.payload.pull_request.base.ref>
+              operator: Equals
+              value: main
+
+  inputYaml: |
+    pipeline:
+      variables:
+        - name: version
+          type: String
+          value: "auto"
+        - name: bump_type
+          type: String
+          value: "auto"
+        - name: dry_run
+          type: String
+          value: "false"
+
+---
+# ── Trigger: Scheduled Nightly Build ─────────────────────────────────────────
+trigger:
+  name: Nightly Build
+  identifier: nightly_build
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  pipelineIdentifier: pos_platform_release
+  description: "Nightly build and test — runs at 2:00 AM EST weekdays"
+  enabled: true
+  tags:
+    type: scheduled
+
+  source:
+    type: Scheduled
+    spec:
+      type: Cron
+      spec:
+        expression: "0 2 * * 1-5"   # 2:00 AM Mon-Fri
+
+  inputYaml: |
+    pipeline:
+      variables:
+        - name: version
+          type: String
+          value: "nightly"
+        - name: bump_type
+          type: String
+          value: "auto"
+        - name: dry_run
+          type: String
+          value: "true"
+
+---
+# ── Trigger: Manual Rollback ─────────────────────────────────────────────────
+trigger:
+  name: Manual Rollback
+  identifier: manual_rollback
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  pipelineIdentifier: pos_platform_release
+  description: "Manual trigger for emergency rollback"
+  enabled: true
+  tags:
+    type: rollback
+
+  source:
+    type: Webhook
+    spec:
+      type: Custom
+      spec:
+        payloadConditions:
+          - key: action
+            operator: Equals
+            value: rollback
+
+  inputYaml: |
+    pipeline:
+      variables:
+        - name: version
+          type: String
+          value: <+trigger.payload.target_version>
+        - name: dry_run
+          type: String
+          value: "false"

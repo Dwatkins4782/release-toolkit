@@ -1,0 +1,129 @@
+# =============================================================================
+# Reusable Rollback Template — GitLab CI/CD
+# =============================================================================
+# Emergency rollback automation with single-click rollback to previous
+# version, automatic notification, and Dynatrace event annotation.
+#
+# Usage:
+#   include:
+#     - project: 'platform/release-toolkit'
+#       ref: main
+#       file: '/ci-templates/rollback.gitlab-ci.yml'
+#
+#   rollback:production:
+#     extends: .rollback_production
+# =============================================================================
+
+.rollback_base:
+  image: alpine/helm:3.14.0
+  before_script:
+    - apk add --no-cache bash curl jq kubectl
+    - |
+      if [ -n "${KUBECONFIG_DATA}" ]; then
+        mkdir -p ~/.kube
+        echo "${KUBECONFIG_DATA}" | base64 -d > ~/.kube/config
+      fi
+
+# ── Emergency Rollback: Production ──────────────────────────────────────────
+
+.rollback_production:
+  extends: .rollback_base
+  stage: deploy-production
+  script:
+    - |
+      echo "╔═══════════════════════════════════════════════╗"
+      echo "║   EMERGENCY ROLLBACK — PRODUCTION             ║"
+      echo "╚═══════════════════════════════════════════════╝"
+    - |
+      NAMESPACE="${PROD_NAMESPACE:-pos-production}"
+      RELEASE_NAME="${HELM_RELEASE:-pos-platform}"
+    - |
+      # Get current revision info before rollback
+      echo "Current deployment state:"
+      helm history ${RELEASE_NAME} --namespace ${NAMESPACE} --max 5 || true
+    - |
+      echo "Rolling back to previous revision..."
+      helm rollback ${RELEASE_NAME} 0 \
+        --namespace ${NAMESPACE} \
+        --wait \
+        --timeout 600s
+    - |
+      echo "Verifying rollback..."
+      kubectl rollout status deployment/${RELEASE_NAME} \
+        --namespace ${NAMESPACE} --timeout=300s
+    - |
+      # Get the version we rolled back to
+      ROLLBACK_VERSION=$(helm get values ${RELEASE_NAME} \
+        --namespace ${NAMESPACE} -o json | jq -r '.global.version // .image.tag // "unknown"')
+      echo "Rolled back to version: ${ROLLBACK_VERSION}"
+    - |
+      # Send rollback notification
+      if [ -n "${SLACK_WEBHOOK_URL}" ]; then
+        curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+          -H 'Content-Type: application/json' \
+          -d "{
+            \"blocks\": [
+              {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"ROLLBACK: Production\"}},
+              {\"type\": \"section\", \"fields\": [
+                {\"type\": \"mrkdwn\", \"text\": \"*Status:* Rolled back\"},
+                {\"type\": \"mrkdwn\", \"text\": \"*Version:* ${ROLLBACK_VERSION}\"},
+                {\"type\": \"mrkdwn\", \"text\": \"*Triggered by:* ${GITLAB_USER_NAME:-CI}\"},
+                {\"type\": \"mrkdwn\", \"text\": \"*Pipeline:* <${CI_PIPELINE_URL}|#${CI_PIPELINE_ID}>\"}
+              ]}
+            ]
+          }" || true
+      fi
+    - echo "Rollback complete ✓"
+  environment:
+    name: production
+    action: stop
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Rollback: Staging ────────────────────────────────────────────────────────
+
+.rollback_staging:
+  extends: .rollback_base
+  stage: deploy-staging
+  script:
+    - |
+      echo "Rolling back staging to previous revision..."
+      NAMESPACE="${STAGING_NAMESPACE:-pos-staging}"
+      RELEASE_NAME="${HELM_RELEASE:-pos-platform}"
+    - helm rollback ${RELEASE_NAME} 0 --namespace ${NAMESPACE} --wait --timeout 300s
+    - kubectl rollout status deployment/${RELEASE_NAME} --namespace ${NAMESPACE} --timeout=120s
+    - echo "Staging rollback complete ✓"
+  environment:
+    name: staging
+    action: stop
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Rollback: Edge Clusters ──────────────────────────────────────────────────
+
+.rollback_edge:
+  extends: .rollback_base
+  stage: deploy-production
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  EDGE CLUSTER ROLLBACK"
+      echo "═══════════════════════════════════════════════"
+    - |
+      if [ -f "scripts/deploy.sh" ]; then
+        chmod +x scripts/deploy.sh
+        bash scripts/deploy.sh --rollback --env production --edge
+      else
+        NAMESPACE="${EDGE_NAMESPACE:-pos-edge}"
+        RELEASE_NAME="${EDGE_HELM_RELEASE:-pos-edge}"
+        helm rollback ${RELEASE_NAME} 0 --namespace ${NAMESPACE} --wait --timeout 600s
+      fi
+    - echo "Edge cluster rollback complete ✓"
+  environment:
+    name: edge
+    action: stop
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

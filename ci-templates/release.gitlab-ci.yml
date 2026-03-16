@@ -1,0 +1,142 @@
+# =============================================================================
+# Reusable Release Template — GitLab CI/CD
+# =============================================================================
+# Include in any project to get version calculation + release notes + tagging.
+#
+# Usage in your .gitlab-ci.yml:
+#   include:
+#     - project: 'platform/release-toolkit'
+#       ref: main
+#       file: '/ci-templates/release.gitlab-ci.yml'
+#
+#   release:version:
+#     extends: .release_version
+#     variables:
+#       BUMP_TYPE: auto
+#
+#   release:notes:
+#     extends: .release_notes
+# =============================================================================
+
+.release_python:
+  image: python:3.11-slim
+  before_script:
+    - pip install --quiet pyyaml requests semver jinja2
+  cache:
+    key: release-toolkit-pip
+    paths:
+      - .pip-cache/
+
+# ── Version Calculation ──────────────────────────────────────────────────────
+
+.release_version:
+  extends: .release_python
+  stage: version
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  SEMANTIC VERSION CALCULATION"
+      echo "═══════════════════════════════════════════════"
+    - |
+      # Clone release-toolkit if scripts aren't local
+      if [ ! -f "scripts/version.py" ]; then
+        pip install --quiet gitpython
+        git clone --depth 1 ${RELEASE_TOOLKIT_REPO:-https://github.com/org/release-toolkit.git} /tmp/release-toolkit
+        export TOOLKIT_DIR=/tmp/release-toolkit
+      else
+        export TOOLKIT_DIR=.
+      fi
+    - |
+      BUMP="${BUMP_TYPE:-auto}"
+      python ${TOOLKIT_DIR}/scripts/version.py \
+        --bump $BUMP \
+        --output version-summary.json \
+        ${DRY_RUN:+--dry-run}
+    - |
+      VERSION=$(python -c "import json; print(json.load(open('version-summary.json'))['version'])")
+      echo "VERSION=${VERSION}" >> version.env
+      echo "Calculated version: ${VERSION}"
+  artifacts:
+    paths:
+      - version-summary.json
+      - version.env
+    reports:
+      dotenv: version.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Release Notes Generation ────────────────────────────────────────────────
+
+.release_notes:
+  extends: .release_python
+  stage: release-notes
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  RELEASE NOTES: ${VERSION}"
+      echo "═══════════════════════════════════════════════"
+    - |
+      if [ ! -f "scripts/release_notes.py" ]; then
+        export TOOLKIT_DIR=/tmp/release-toolkit
+        [ -d "$TOOLKIT_DIR" ] || git clone --depth 1 ${RELEASE_TOOLKIT_REPO:-https://github.com/org/release-toolkit.git} $TOOLKIT_DIR
+      else
+        export TOOLKIT_DIR=.
+      fi
+    - python ${TOOLKIT_DIR}/scripts/release_notes.py --version ${VERSION} --format md --output release-notes-${VERSION}.md
+    - python ${TOOLKIT_DIR}/scripts/release_notes.py --version ${VERSION} --format json --output release-notes-${VERSION}.json
+    - echo "Release notes generated successfully"
+    - cat release-notes-${VERSION}.md
+  artifacts:
+    paths:
+      - release-notes-${VERSION}.md
+      - release-notes-${VERSION}.json
+      - CHANGELOG.md
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Git Tag Creation ─────────────────────────────────────────────────────────
+
+.release_tag:
+  extends: .release_python
+  stage: release-notes
+  script:
+    - |
+      echo "Creating Git tag: ${VERSION}"
+      git config user.email "${GITLAB_USER_EMAIL:-ci@release-toolkit}"
+      git config user.name "${GITLAB_USER_NAME:-Release Bot}"
+      git tag -a "${VERSION}" -m "Release ${VERSION}"
+      git push origin "${VERSION}"
+      echo "Tag ${VERSION} pushed successfully"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+# ── Work Item Tagging ────────────────────────────────────────────────────────
+
+.release_tag_work_items:
+  extends: .release_python
+  stage: tag-work-items
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  TAGGING WORK ITEMS: ${VERSION}"
+      echo "═══════════════════════════════════════════════"
+    - |
+      if [ ! -f "scripts/tag_work_items.py" ]; then
+        export TOOLKIT_DIR=/tmp/release-toolkit
+        [ -d "$TOOLKIT_DIR" ] || git clone --depth 1 ${RELEASE_TOOLKIT_REPO:-https://github.com/org/release-toolkit.git} $TOOLKIT_DIR
+      else
+        export TOOLKIT_DIR=.
+      fi
+    - |
+      python ${TOOLKIT_DIR}/scripts/tag_work_items.py \
+        --version ${VERSION} \
+        --provider ${TICKET_PROVIDER:-jira} \
+        ${TAG_TRANSITION:+--transition} \
+        --output tagged-items.json
+  artifacts:
+    paths:
+      - tagged-items.json
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

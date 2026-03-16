@@ -1,0 +1,126 @@
+# =============================================================================
+# Reusable QA Bridge Template — GitLab CI/CD
+# =============================================================================
+# QA handoff bridge: deploys to QA, generates test manifests, triggers
+# test automation, and notifies the QA team.
+#
+# Usage:
+#   include:
+#     - project: 'platform/release-toolkit'
+#       ref: main
+#       file: '/ci-templates/qa-bridge.gitlab-ci.yml'
+#
+#   qa:handoff:
+#     extends: .qa_bridge_handoff
+#     variables:
+#       QA_NAMESPACE: "pos-qa"
+# =============================================================================
+
+.qa_bridge_base:
+  image: alpine/helm:3.14.0
+  before_script:
+    - apk add --no-cache bash curl python3 py3-pip jq
+    - pip install --quiet pyyaml requests semver jinja2 python-dotenv
+
+# ── QA Handoff (Full Pipeline) ──────────────────────────────────────────────
+
+.qa_bridge_handoff:
+  extends: .qa_bridge_base
+  stage: qa-bridge
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  QA BRIDGE: Handoff for ${VERSION}"
+      echo "═══════════════════════════════════════════════"
+    - |
+      if [ ! -f "scripts/prepare_qa_handoff.py" ]; then
+        pip install --quiet gitpython
+        git clone --depth 1 ${RELEASE_TOOLKIT_REPO:-https://github.com/org/release-toolkit.git} /tmp/release-toolkit
+        export TOOLKIT_DIR=/tmp/release-toolkit
+      else
+        export TOOLKIT_DIR=.
+      fi
+    - pip install --quiet -r ${TOOLKIT_DIR}/requirements.txt
+    - |
+      python ${TOOLKIT_DIR}/scripts/prepare_qa_handoff.py \
+        --version ${VERSION} \
+        --env ${QA_ENV:-qa} \
+        --output-dir ./qa-artifacts \
+        ${QA_SKIP_DEPLOY:+--skip-deploy} \
+        ${QA_SKIP_TESTS:+--skip-tests} \
+        ${QA_SKIP_NOTIFY:+--skip-notify}
+    - echo "QA Bridge handoff complete"
+  artifacts:
+    paths:
+      - qa-artifacts/release-manifest.json
+      - qa-artifacts/qa-checklist.md
+      - qa-artifacts/feature-toggle-snapshot.json
+    expire_in: 30 days
+  environment:
+    name: qa
+    url: ${QA_ENV_URL:-https://qa.pos-platform.myorg.com}
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── QA Deploy Only (Skip Tests & Notify) ────────────────────────────────────
+
+.qa_bridge_deploy_only:
+  extends: .qa_bridge_base
+  stage: qa-bridge
+  script:
+    - |
+      echo "Deploying ${VERSION} to QA environment..."
+      NAMESPACE="${QA_NAMESPACE:-pos-qa}"
+      CHART="${HELM_CHART:-./charts/pos-platform}"
+      VALUES="${QA_VALUES:-k8s/helm-values/values-qa.yaml}"
+    - |
+      helm upgrade --install pos-platform ${CHART} \
+        --namespace ${NAMESPACE} \
+        --values ${VALUES} \
+        --set image.tag=${VERSION} \
+        --set global.version=${VERSION} \
+        --wait \
+        --timeout 300s \
+        --atomic
+    - |
+      echo "Verifying QA deployment..."
+      kubectl rollout status deployment/pos-platform \
+        --namespace ${NAMESPACE} --timeout=120s
+    - echo "QA deployment verified"
+  environment:
+    name: qa
+    url: ${QA_ENV_URL:-https://qa.pos-platform.myorg.com}
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── QA Test Manifest Only (No Deploy) ───────────────────────────────────────
+
+.qa_bridge_manifest_only:
+  extends: .qa_bridge_base
+  stage: qa-bridge
+  script:
+    - |
+      echo "Generating QA test manifest for ${VERSION}..."
+    - |
+      if [ ! -f "scripts/prepare_qa_handoff.py" ]; then
+        export TOOLKIT_DIR=/tmp/release-toolkit
+        [ -d "$TOOLKIT_DIR" ] || git clone --depth 1 ${RELEASE_TOOLKIT_REPO:-https://github.com/org/release-toolkit.git} $TOOLKIT_DIR
+      else
+        export TOOLKIT_DIR=.
+      fi
+    - pip install --quiet -r ${TOOLKIT_DIR}/requirements.txt
+    - |
+      python ${TOOLKIT_DIR}/scripts/prepare_qa_handoff.py \
+        --version ${VERSION} \
+        --env ${QA_ENV:-qa} \
+        --output-dir ./qa-artifacts \
+        --skip-deploy \
+        --skip-tests
+    - echo "QA manifest generated"
+    - cat ./qa-artifacts/qa-checklist.md
+  artifacts:
+    paths:
+      - qa-artifacts/
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

@@ -1,0 +1,164 @@
+# =============================================================================
+# Edge Rollout Monitor — CronJob
+# =============================================================================
+# Periodically checks edge deployment health across all store clusters.
+# Reports rollout status to Grafana and Slack. Runs every 5 minutes
+# during active rollouts, hourly otherwise.
+# =============================================================================
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: edge-rollout-monitor
+  namespace: pos-edge
+  labels:
+    app: pos-edge
+    component: monitoring
+spec:
+  schedule: "*/5 * * * *"    # Every 5 minutes during active rollout
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 240
+      template:
+        metadata:
+          labels:
+            app: edge-rollout-monitor
+        spec:
+          serviceAccountName: edge-monitor-sa
+          restartPolicy: OnFailure
+          containers:
+            - name: monitor
+              image: bitnami/kubectl:1.28
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  echo "═══════════════════════════════════════════════"
+                  echo "  EDGE ROLLOUT MONITOR — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+                  echo "═══════════════════════════════════════════════"
+
+                  NAMESPACE="pos-edge"
+                  HEALTHY=0
+                  UNHEALTHY=0
+                  TOTAL=0
+
+                  # Check Deployment rollout status
+                  for DEPLOY in $(kubectl get deployments -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}'); do
+                    TOTAL=$((TOTAL + 1))
+                    DESIRED=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.spec.replicas}')
+                    AVAILABLE=$(kubectl get deployment ${DEPLOY} -n ${NAMESPACE} -o jsonpath='{.status.availableReplicas}')
+                    AVAILABLE=${AVAILABLE:-0}
+
+                    if [ "${DESIRED}" = "${AVAILABLE}" ]; then
+                      echo "  ✓ ${DEPLOY}: ${AVAILABLE}/${DESIRED} ready"
+                      HEALTHY=$((HEALTHY + 1))
+                    else
+                      echo "  ✗ ${DEPLOY}: ${AVAILABLE}/${DESIRED} ready"
+                      UNHEALTHY=$((UNHEALTHY + 1))
+                    fi
+                  done
+
+                  # Check DaemonSet rollout status
+                  for DS in $(kubectl get daemonsets -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}'); do
+                    TOTAL=$((TOTAL + 1))
+                    DESIRED=$(kubectl get daemonset ${DS} -n ${NAMESPACE} -o jsonpath='{.status.desiredNumberScheduled}')
+                    READY=$(kubectl get daemonset ${DS} -n ${NAMESPACE} -o jsonpath='{.status.numberReady}')
+                    READY=${READY:-0}
+
+                    if [ "${DESIRED}" = "${READY}" ]; then
+                      echo "  ✓ ${DS} (DaemonSet): ${READY}/${DESIRED} ready"
+                      HEALTHY=$((HEALTHY + 1))
+                    else
+                      echo "  ✗ ${DS} (DaemonSet): ${READY}/${DESIRED} ready"
+                      UNHEALTHY=$((UNHEALTHY + 1))
+                    fi
+                  done
+
+                  # Summary
+                  echo ""
+                  echo "Summary: ${HEALTHY}/${TOTAL} healthy, ${UNHEALTHY} unhealthy"
+
+                  # Push metrics to Pushgateway (if available)
+                  if [ -n "${PUSHGATEWAY_URL:-}" ]; then
+                    cat <<METRICS | curl -s --data-binary @- "${PUSHGATEWAY_URL}/metrics/job/edge_rollout_monitor"
+                  edge_rollout_healthy_count ${HEALTHY}
+                  edge_rollout_unhealthy_count ${UNHEALTHY}
+                  edge_rollout_total_count ${TOTAL}
+                  edge_rollout_last_check_timestamp $(date +%s)
+                  METRICS
+                  fi
+
+                  # Alert on unhealthy deployments
+                  if [ ${UNHEALTHY} -gt 0 ] && [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+                    curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+                      -H 'Content-Type: application/json' \
+                      -d "{
+                        \"text\": \"Edge Rollout Alert: ${UNHEALTHY}/${TOTAL} workloads unhealthy in ${NAMESPACE}\"
+                      }" || true
+                  fi
+
+                  # Exit with error if any unhealthy
+                  [ ${UNHEALTHY} -eq 0 ] || exit 1
+              env:
+                - name: SLACK_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: edge-monitor-secrets
+                      key: slack_webhook_url
+                      optional: true
+                - name: PUSHGATEWAY_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: edge-store-config
+                      key: pushgateway_url
+                      optional: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+
+---
+# ── Monitor Service Account ──────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-monitor-sa
+  namespace: pos-edge
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: edge-monitor-role
+  namespace: pos-edge
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: edge-monitor-binding
+  namespace: pos-edge
+subjects:
+  - kind: ServiceAccount
+    name: edge-monitor-sa
+roleRef:
+  kind: Role
+  name: edge-monitor-role
+  apiGroup: rbac.authorization.k8s.io

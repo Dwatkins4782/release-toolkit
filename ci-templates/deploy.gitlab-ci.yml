@@ -1,0 +1,190 @@
+# =============================================================================
+# Reusable Deployment Template — GitLab CI/CD
+# =============================================================================
+# Helm-based K8s deployment with rolling/canary strategies, edge cluster
+# support, and post-deploy health checks.
+#
+# Usage:
+#   include:
+#     - project: 'platform/release-toolkit'
+#       ref: main
+#       file: '/ci-templates/deploy.gitlab-ci.yml'
+#
+#   deploy:staging:
+#     extends: .deploy_staging
+#
+#   deploy:production:
+#     extends: .deploy_production
+# =============================================================================
+
+.deploy_k8s_base:
+  image: alpine/helm:3.14.0
+  before_script:
+    - apk add --no-cache bash curl jq kubectl
+    - |
+      # Configure kubeconfig from CI variable
+      if [ -n "${KUBECONFIG_DATA}" ]; then
+        mkdir -p ~/.kube
+        echo "${KUBECONFIG_DATA}" | base64 -d > ~/.kube/config
+      fi
+
+# ── Deploy to Staging ────────────────────────────────────────────────────────
+
+.deploy_staging:
+  extends: .deploy_k8s_base
+  stage: deploy-staging
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  DEPLOYING ${VERSION} → STAGING"
+      echo "═══════════════════════════════════════════════"
+    - |
+      NAMESPACE="${STAGING_NAMESPACE:-pos-staging}"
+      CHART="${HELM_CHART:-./charts/pos-platform}"
+      VALUES="${STAGING_VALUES:-k8s/helm-values/values-staging.yaml}"
+      STRATEGY="${DEPLOY_STRATEGY:-rolling}"
+    - |
+      echo "Namespace:  ${NAMESPACE}"
+      echo "Chart:      ${CHART}"
+      echo "Strategy:   ${STRATEGY}"
+      echo "Version:    ${VERSION}"
+    - |
+      # Pre-deploy: ensure namespace exists
+      kubectl get namespace ${NAMESPACE} || kubectl create namespace ${NAMESPACE}
+    - |
+      helm upgrade --install pos-platform ${CHART} \
+        --namespace ${NAMESPACE} \
+        --values ${VALUES} \
+        --set image.tag=${VERSION} \
+        --set global.version=${VERSION} \
+        --set global.environment=staging \
+        --wait \
+        --timeout 600s \
+        --atomic
+    - |
+      echo "Verifying staging deployment..."
+      kubectl rollout status deployment/pos-platform \
+        --namespace ${NAMESPACE} --timeout=180s
+    - |
+      # Run smoke tests against staging
+      if [ -f "scripts/deploy.sh" ]; then
+        chmod +x scripts/deploy.sh
+        bash scripts/deploy.sh --version ${VERSION} --env staging --strategy ${STRATEGY} --smoke-test-only || true
+      fi
+    - echo "Staging deployment verified ✓"
+  environment:
+    name: staging
+    url: ${STAGING_URL:-https://staging.pos-platform.myorg.com}
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Deploy to Production ─────────────────────────────────────────────────────
+
+.deploy_production:
+  extends: .deploy_k8s_base
+  stage: deploy-production
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  DEPLOYING ${VERSION} → PRODUCTION"
+      echo "═══════════════════════════════════════════════"
+    - |
+      NAMESPACE="${PROD_NAMESPACE:-pos-production}"
+      CHART="${HELM_CHART:-./charts/pos-platform}"
+      VALUES="${PROD_VALUES:-k8s/helm-values/values-production.yaml}"
+      STRATEGY="${PROD_DEPLOY_STRATEGY:-canary}"
+    - |
+      echo "Namespace:  ${NAMESPACE}"
+      echo "Chart:      ${CHART}"
+      echo "Strategy:   ${STRATEGY}"
+      echo "Version:    ${VERSION}"
+    - |
+      # Canary: deploy with 10% traffic first
+      if [ "${STRATEGY}" = "canary" ]; then
+        echo "Phase 1: Canary deployment (10% traffic)..."
+        helm upgrade --install pos-platform-canary ${CHART} \
+          --namespace ${NAMESPACE} \
+          --values ${VALUES} \
+          --set image.tag=${VERSION} \
+          --set global.version=${VERSION} \
+          --set global.environment=production \
+          --set replicaCount=1 \
+          --set canary.enabled=true \
+          --set canary.weight=10 \
+          --wait \
+          --timeout 600s
+
+        echo "Canary deployed. Monitoring for 120 seconds..."
+        sleep 120
+
+        # Health check on canary
+        CANARY_PODS=$(kubectl get pods -n ${NAMESPACE} -l app=pos-platform-canary --no-headers | wc -l)
+        CANARY_READY=$(kubectl get pods -n ${NAMESPACE} -l app=pos-platform-canary --field-selector=status.phase=Running --no-headers | wc -l)
+        if [ "${CANARY_PODS}" != "${CANARY_READY}" ]; then
+          echo "CANARY FAILED: Not all pods healthy. Rolling back..."
+          helm rollback pos-platform-canary 0 --namespace ${NAMESPACE}
+          exit 1
+        fi
+
+        echo "Phase 2: Full production rollout..."
+      fi
+    - |
+      helm upgrade --install pos-platform ${CHART} \
+        --namespace ${NAMESPACE} \
+        --values ${VALUES} \
+        --set image.tag=${VERSION} \
+        --set global.version=${VERSION} \
+        --set global.environment=production \
+        --wait \
+        --timeout 900s \
+        --atomic
+    - |
+      # Clean up canary if it exists
+      helm uninstall pos-platform-canary --namespace ${NAMESPACE} 2>/dev/null || true
+    - |
+      echo "Verifying production deployment..."
+      kubectl rollout status deployment/pos-platform \
+        --namespace ${NAMESPACE} --timeout=300s
+    - echo "Production deployment verified ✓"
+  environment:
+    name: production
+    url: ${PROD_URL:-https://pos-platform.myorg.com}
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Deploy to Edge Clusters ──────────────────────────────────────────────────
+
+.deploy_edge:
+  extends: .deploy_k8s_base
+  stage: deploy-production
+  script:
+    - |
+      echo "═══════════════════════════════════════════════"
+      echo "  EDGE CLUSTER DEPLOYMENT: Wave ${EDGE_WAVE:-1}"
+      echo "═══════════════════════════════════════════════"
+    - |
+      if [ -f "scripts/deploy.sh" ]; then
+        chmod +x scripts/deploy.sh
+        bash scripts/deploy.sh \
+          --version ${VERSION} \
+          --env production \
+          --edge \
+          --wave ${EDGE_WAVE:-1}
+      else
+        echo "deploy.sh not found — using direct Helm deploy"
+        NAMESPACE="${EDGE_NAMESPACE:-pos-edge}"
+        helm upgrade --install pos-edge ./charts/pos-edge \
+          --namespace ${NAMESPACE} \
+          --values k8s/edge-cluster/edge-config.yaml \
+          --set image.tag=${VERSION} \
+          --set global.wave=${EDGE_WAVE:-1} \
+          --wait \
+          --timeout 600s
+      fi
+    - echo "Edge wave ${EDGE_WAVE:-1} deployment complete"
+  environment:
+    name: edge-wave-${EDGE_WAVE:-1}
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

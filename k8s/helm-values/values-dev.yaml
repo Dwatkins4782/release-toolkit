@@ -1,0 +1,58 @@
+# =============================================================================
+# Helm Values — Development Environment
+# =============================================================================
+# Minimal resources for local/dev testing. No HA, no ingress TLS.
+
+global:
+  environment: dev
+  version: "latest"
+  imageRegistry: "registry.dev.myorg.com"
+
+replicaCount: 1
+
+image:
+  repository: pos-platform/pos-service
+  tag: "latest"
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  hosts:
+    - host: pos-dev.myorg.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+env:
+  - name: APP_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "debug"
+  - name: DB_HOST
+    value: "postgres-dev.myorg.local"
+
+featureToggles:
+  enabled: true
+  sdkKey: "sdk-dev-placeholder"
+
+monitoring:
+  enabled: false
+
+autoscaling:
+  enabled: false

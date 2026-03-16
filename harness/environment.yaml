@@ -1,0 +1,168 @@
+# =============================================================================
+# Harness Environment Definitions — POS Platform
+# =============================================================================
+# Defines QA, staging, production, and edge environments with their
+# infrastructure definitions and overrides.
+# =============================================================================
+
+---
+# ── QA Environment ───────────────────────────────────────────────────────────
+environment:
+  name: QA
+  identifier: qa
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  type: PreProduction
+  description: "QA environment for automated and manual testing"
+  tags:
+    tier: non-production
+
+  overrides:
+    manifests:
+      - manifest:
+          identifier: qa_values
+          type: Values
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: github_connector
+                repoName: release-toolkit
+                branch: main
+                paths:
+                  - k8s/helm-values/values-qa.yaml
+
+  infrastructureDefinitions:
+    - identifier: qa_k8s
+      name: QA Kubernetes Cluster
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_qa_cluster
+        namespace: pos-qa
+        releaseName: pos-platform-qa
+
+---
+# ── Staging Environment ──────────────────────────────────────────────────────
+environment:
+  name: Staging
+  identifier: staging
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  type: PreProduction
+  description: "Staging environment — production mirror for final validation"
+  tags:
+    tier: pre-production
+
+  overrides:
+    manifests:
+      - manifest:
+          identifier: staging_values
+          type: Values
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: github_connector
+                repoName: release-toolkit
+                branch: main
+                paths:
+                  - k8s/helm-values/values-staging.yaml
+
+  infrastructureDefinitions:
+    - identifier: staging_k8s
+      name: Staging Kubernetes Cluster
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_staging_cluster
+        namespace: pos-staging
+        releaseName: pos-platform-staging
+
+---
+# ── Production Environment ───────────────────────────────────────────────────
+environment:
+  name: Production
+  identifier: production
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  type: Production
+  description: "Production environment — serves live POS traffic"
+  tags:
+    tier: production
+    criticality: p1
+
+  overrides:
+    manifests:
+      - manifest:
+          identifier: prod_values
+          type: Values
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: github_connector
+                repoName: release-toolkit
+                branch: main
+                paths:
+                  - k8s/helm-values/values-production.yaml
+
+  infrastructureDefinitions:
+    - identifier: prod_k8s
+      name: Production Kubernetes Cluster
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_prod_cluster
+        namespace: pos-production
+        releaseName: pos-platform-prod
+
+---
+# ── Edge Environment ─────────────────────────────────────────────────────────
+environment:
+  name: Edge Clusters
+  identifier: edge
+  orgIdentifier: retail_engineering
+  projectIdentifier: pos_platform
+  type: Production
+  description: "Edge Kubernetes clusters deployed in retail stores"
+  tags:
+    tier: edge
+    criticality: p1
+
+  overrides:
+    manifests:
+      - manifest:
+          identifier: edge_values
+          type: Values
+          spec:
+            store:
+              type: Github
+              spec:
+                connectorRef: github_connector
+                repoName: release-toolkit
+                branch: main
+                paths:
+                  - k8s/edge-cluster/edge-config.yaml
+
+  infrastructureDefinitions:
+    - identifier: edge_pilot
+      name: Edge Pilot Stores (Wave 1)
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_edge_pilot
+        namespace: pos-edge
+        releaseName: pos-edge-pilot
+
+    - identifier: edge_regional
+      name: Edge Regional Stores (Wave 2)
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_edge_regional
+        namespace: pos-edge
+        releaseName: pos-edge-regional
+
+    - identifier: edge_full
+      name: Edge All Stores (Wave 3)
+      type: KubernetesDirect
+      spec:
+        connectorRef: k8s_edge_full
+        namespace: pos-edge
+        releaseName: pos-edge-full

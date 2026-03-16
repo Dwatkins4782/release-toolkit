@@ -1,0 +1,97 @@
+# =============================================================================
+# Conventional Commits Configuration
+# =============================================================================
+# Defines how commit types map to semantic version bumps and release note categories.
+
+version_bump_rules:
+  major:
+    - "BREAKING CHANGE"
+    - "breaking"
+  minor:
+    - "feat"
+    - "feature"
+  patch:
+    - "fix"
+    - "bugfix"
+    - "perf"
+    - "refactor"
+    - "security"
+
+commit_types:
+  feat:
+    label: "Features"
+    emoji: "rocket"
+    bump: "minor"
+  fix:
+    label: "Bug Fixes"
+    emoji: "bug"
+    bump: "patch"
+  perf:
+    label: "Performance Improvements"
+    emoji: "zap"
+    bump: "patch"
+  refactor:
+    label: "Code Refactoring"
+    emoji: "recycle"
+    bump: "patch"
+  security:
+    label: "Security"
+    emoji: "lock"
+    bump: "patch"
+  docs:
+    label: "Documentation"
+    emoji: "memo"
+    bump: null
+  test:
+    label: "Tests"
+    emoji: "white_check_mark"
+    bump: null
+  ci:
+    label: "CI/CD"
+    emoji: "construction_worker"
+    bump: null
+  chore:
+    label: "Chores"
+    emoji: "wrench"
+    bump: null
+  build:
+    label: "Build System"
+    emoji: "hammer"
+    bump: null
+
+scopes:
+  # Map commit scopes to service names and test suites
+  pos-terminal:
+    service: "pos-terminal-service"
+    test_suite: "suite-pos-terminal-001"
+    edge_deploy: true
+  payment:
+    service: "payment-gateway"
+    test_suite: "suite-payment-001"
+    edge_deploy: false
+  store-config:
+    service: "store-config-service"
+    test_suite: "suite-edge-001"
+    edge_deploy: true
+  inventory:
+    service: "inventory-service"
+    test_suite: "suite-regression-001"
+    edge_deploy: false
+  ui:
+    service: "pos-ui"
+    test_suite: "suite-smoke-001"
+    edge_deploy: true
+  api:
+    service: "all"
+    test_suite: "suite-regression-001"
+    edge_deploy: false
+
+ticket_patterns:
+  # Regex patterns to extract work item references from commit messages
+  jira: "[A-Z]{2,10}-\\d+"
+  github: "#\\d+"
+
+breaking_change_indicators:
+  - "BREAKING CHANGE:"
+  - "BREAKING-CHANGE:"
+  - "!:"

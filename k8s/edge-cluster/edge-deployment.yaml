@@ -1,0 +1,197 @@
+# =============================================================================
+# Edge Cluster Deployment — POS Terminal / In-Store Edge K8s
+# =============================================================================
+# Designed for resource-constrained edge hardware running in retail stores.
+# DaemonSet ensures one POS agent per edge node. Deployment handles the
+# store-level API service.
+# =============================================================================
+
+---
+# ── POS Edge API Service (Deployment) ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pos-edge-api
+  namespace: pos-edge
+  labels:
+    app: pos-edge-api
+    component: edge
+    tier: api
+  annotations:
+    release-toolkit/managed: "true"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: pos-edge-api
+  template:
+    metadata:
+      labels:
+        app: pos-edge-api
+        component: edge
+        tier: api
+    spec:
+      serviceAccountName: pos-edge-sa
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: pos-edge-api
+          image: registry.prod.myorg.com/pos-platform/pos-edge-api:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: EDGE_MODE
+              value: "true"
+            - name: STORE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-store-config
+                  key: store_id
+            - name: REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-store-config
+                  key: region
+            - name: DB_CONNECTION
+              valueFrom:
+                secretKeyRef:
+                  name: pos-edge-db
+                  key: connection_string
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 5
+          volumeMounts:
+            - name: edge-config
+              mountPath: /etc/pos-edge/config
+              readOnly: true
+      volumes:
+        - name: edge-config
+          configMap:
+            name: edge-store-config
+      nodeSelector:
+        node-role: edge
+      tolerations:
+        - key: "edge"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+---
+# ── POS Terminal Agent (DaemonSet) ───────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pos-terminal-agent
+  namespace: pos-edge
+  labels:
+    app: pos-terminal-agent
+    component: edge
+    tier: agent
+spec:
+  selector:
+    matchLabels:
+      app: pos-terminal-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: pos-terminal-agent
+        component: edge
+        tier: agent
+    spec:
+      serviceAccountName: pos-edge-sa
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: pos-terminal-agent
+          image: registry.prod.myorg.com/pos-platform/pos-terminal-agent:latest
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: EDGE_MODE
+              value: "true"
+            - name: STORE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-store-config
+                  key: store_id
+            - name: SYNC_INTERVAL_SECONDS
+              value: "30"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      nodeSelector:
+        node-role: pos-terminal
+      tolerations:
+        - key: "pos-terminal"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+---
+# ── Edge Service ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: pos-edge-api
+  namespace: pos-edge
+  labels:
+    app: pos-edge-api
+spec:
+  selector:
+    app: pos-edge-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+
+---
+# ── Service Account ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pos-edge-sa
+  namespace: pos-edge
+  labels:
+    app: pos-edge

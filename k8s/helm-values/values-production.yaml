@@ -1,0 +1,135 @@
+# =============================================================================
+# Helm Values — Production Environment
+# =============================================================================
+# Full HA configuration. Strict resource limits, PodDisruptionBudget,
+# anti-affinity, Dynatrace APM, autoscaling, and network policies.
+
+global:
+  environment: production
+  version: "0.0.0"
+  imageRegistry: "registry.prod.myorg.com"
+
+replicaCount: 3
+
+image:
+  repository: pos-platform/pos-service
+  tag: "0.0.0"
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: pos-platform.myorg.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: pos-prod-tls
+      hosts:
+        - pos-platform.myorg.com
+
+env:
+  - name: APP_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "warn"
+  - name: DB_HOST
+    valueFrom:
+      secretKeyRef:
+        name: pos-db-credentials
+        key: host
+
+featureToggles:
+  enabled: true
+  sdkKey: "sdk-prod-placeholder"
+
+monitoring:
+  enabled: true
+  dynatrace:
+    enabled: true
+    injectAgent: true
+    environmentId: "abc12345"
+  prometheus:
+    scrape: true
+    port: 9090
+  grafana:
+    dashboardEnabled: true
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 75
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - pos-platform
+          topologyKey: kubernetes.io/hostname
+
+tolerations: []
+
+nodeSelector:
+  node-role: application
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  failureThreshold: 5
+
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  readOnlyRootFilesystem: true

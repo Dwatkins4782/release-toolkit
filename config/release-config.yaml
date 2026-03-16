@@ -1,0 +1,142 @@
+# =============================================================================
+# Release Toolkit — Central Configuration
+# =============================================================================
+# This file is the single source of truth for all release automation settings.
+# Override any value with environment variables prefixed with RT_ (e.g., RT_PROJECT_NAME)
+
+project:
+  name: "pos-platform"
+  description: "POS Platform Release Automation"
+  default_branch: "main"
+  release_branch_pattern: "release/*"
+
+repositories:
+  # Multi-repo correlation: list all repos that comprise a release
+  primary: "pos-platform"
+  services:
+    - name: "pos-terminal-service"
+      repo_url: "https://gitlab.com/myorg/pos-terminal-service"
+      helm_chart: "charts/pos-terminal"
+      edge_deploy: true
+    - name: "payment-gateway"
+      repo_url: "https://gitlab.com/myorg/payment-gateway"
+      helm_chart: "charts/payment-gateway"
+      edge_deploy: false
+    - name: "store-config-service"
+      repo_url: "https://gitlab.com/myorg/store-config-service"
+      helm_chart: "charts/store-config"
+      edge_deploy: true
+    - name: "inventory-service"
+      repo_url: "https://gitlab.com/myorg/inventory-service"
+      helm_chart: "charts/inventory"
+      edge_deploy: false
+    - name: "pos-ui"
+      repo_url: "https://gitlab.com/myorg/pos-ui"
+      helm_chart: "charts/pos-ui"
+      edge_deploy: true
+
+jira:
+  base_url: "https://myorg.atlassian.net"
+  project_key: "POS"
+  release_label_prefix: "released-in"
+  transition_ids:
+    ready_for_qa: "31"
+    in_qa: "41"
+    done: "51"
+    released: "61"
+  custom_fields:
+    release_version: "customfield_10100"
+    target_stores: "customfield_10101"
+
+docker:
+  registries:
+    dev: "registry.dev.myorg.com"
+    staging: "registry.staging.myorg.com"
+    production: "registry.prod.myorg.com"
+  image_prefix: "pos-platform"
+
+kubernetes:
+  namespaces:
+    dev: "pos-dev"
+    qa: "pos-qa"
+    staging: "pos-staging"
+    production: "pos-prod"
+  helm:
+    release_name: "pos-platform"
+    chart_path: "./charts/pos-platform"
+    values_dir: "./k8s/helm-values"
+    timeout: "600s"
+
+edge_clusters:
+  # POS terminal and in-store edge Kubernetes clusters
+  rollout_strategy: "canary"       # canary | rolling | blue-green
+  canary_percentage: 10
+  store_groups:
+    - name: "us-east-pilot"
+      clusters: ["store-nyc-001", "store-bos-002", "store-phi-003"]
+      wave: 1
+    - name: "us-east-full"
+      clusters: ["store-us-east-*"]
+      wave: 2
+    - name: "us-west"
+      clusters: ["store-us-west-*"]
+      wave: 3
+    - name: "international"
+      clusters: ["store-eu-*", "store-apac-*"]
+      wave: 4
+  health_check:
+    endpoint: "/api/health"
+    timeout_seconds: 120
+    success_threshold: 3
+
+notifications:
+  slack:
+    webhook_url: "${SLACK_WEBHOOK_URL}"
+    channels:
+      release: "#pos-releases"
+      qa: "#pos-qa-team"
+      ops: "#pos-ops"
+      incidents: "#pos-incidents"
+  teams:
+    webhook_url: "${TEAMS_WEBHOOK_URL}"
+
+feature_toggles:
+  provider: "launchdarkly"           # launchdarkly | split | unleash
+  api_endpoint: "https://app.launchdarkly.com/api/v2"
+  project_key: "pos-platform"
+  environments:
+    qa: "qa"
+    staging: "staging"
+    production: "production"
+
+monitoring:
+  dynatrace:
+    api_endpoint: "https://myorg.live.dynatrace.com/api/v2"
+    entity_selector: "type(SERVICE),tag(pos-platform)"
+  grafana:
+    api_endpoint: "https://grafana.myorg.com/api"
+    dashboard_uid: "pos-release-overview"
+    org_id: 1
+
+harness:
+  account_id: "${HARNESS_ACCOUNT_ID}"
+  org_id: "pos_engineering"
+  project_id: "pos_platform"
+  pipeline_id: "pos_release_pipeline"
+
+qa_bridge:
+  test_automation:
+    trigger_url: "https://qa-automation.myorg.com/api/v1/suites/trigger"
+    suite_ids:
+      smoke: "suite-smoke-001"
+      regression: "suite-regression-001"
+      pos_terminal: "suite-pos-terminal-001"
+      edge_cluster: "suite-edge-001"
+      payment: "suite-payment-001"
+  deploy_timeout: "300s"
+  manual_test_tags:
+    - "[manual-test]"
+    - "[pos-hardware]"
+    - "[edge-verify]"
+  checklist_output: "qa-checklist.md"
+  manifest_output: "release-manifest.json"

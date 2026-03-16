@@ -1,0 +1,69 @@
+# =============================================================================
+# Edge Cluster Configuration — Store-Specific Settings
+# =============================================================================
+# ConfigMap injected into POS edge deployments. Each store cluster
+# overrides these values via Helm or Kustomize overlays.
+# =============================================================================
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-store-config
+  namespace: pos-edge
+  labels:
+    app: pos-edge
+    component: config
+data:
+  # ── Store Identity ─────────────────────────────────────────────────────────
+  store_id: "STORE-0001"
+  store_name: "Default Store"
+  region: "us-east-1"
+  district: "district-northeast"
+  store_type: "full-service"         # full-service | express | kiosk
+
+  # ── Network Configuration ──────────────────────────────────────────────────
+  api_gateway_url: "https://api.pos-platform.myorg.com"
+  sync_endpoint: "https://sync.pos-platform.myorg.com/v1"
+  fallback_mode: "offline-capable"   # offline-capable | online-only
+
+  # ── POS Terminal Settings ──────────────────────────────────────────────────
+  terminal_count: "8"
+  payment_processor: "stripe"
+  nfc_enabled: "true"
+  receipt_printer: "network"         # network | usb | none
+
+  # ── Sync & Caching ────────────────────────────────────────────────────────
+  sync_interval_seconds: "30"
+  catalog_cache_ttl_minutes: "60"
+  offline_transaction_buffer: "500"
+
+  # ── Feature Toggles (edge-specific overrides) ─────────────────────────────
+  feature_nfc_payments: "true"
+  feature_loyalty_program: "true"
+  feature_self_checkout: "false"
+  feature_digital_receipts: "true"
+
+  # ── Monitoring ─────────────────────────────────────────────────────────────
+  metrics_enabled: "true"
+  metrics_push_interval: "60"
+  health_check_interval: "30"
+
+  # ── Rollout Configuration ──────────────────────────────────────────────────
+  rollout_wave: "1"                  # 1=pilot, 2=regional, 3=full
+  rollout_group: "us-east-pilot"
+  canary_percentage: "10"
+
+---
+# ── Store-Specific Secrets (template — actual values from Vault/SOPS) ────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pos-edge-db
+  namespace: pos-edge
+  labels:
+    app: pos-edge
+type: Opaque
+stringData:
+  connection_string: "postgresql://pos_edge:changeme@localhost:5432/pos_store"
+  encryption_key: "changeme-use-vault-in-production"

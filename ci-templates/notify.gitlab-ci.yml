@@ -1,0 +1,180 @@
+# =============================================================================
+# Reusable Notification Template — GitLab CI/CD
+# =============================================================================
+# Slack and Teams notification jobs for release events: deployments,
+# QA handoff, rollbacks, and release summaries.
+#
+# Usage:
+#   include:
+#     - project: 'platform/release-toolkit'
+#       ref: main
+#       file: '/ci-templates/notify.gitlab-ci.yml'
+#
+#   notify:release:
+#     extends: .notify_release_slack
+# =============================================================================
+
+.notify_base:
+  image: python:3.11-slim
+  before_script:
+    - pip install --quiet requests pyyaml
+
+# ── Slack: Release Deployed ──────────────────────────────────────────────────
+
+.notify_release_slack:
+  extends: .notify_base
+  stage: notify
+  script:
+    - |
+      python -c "
+      import requests, os, json
+
+      webhook = os.environ.get('SLACK_WEBHOOK_URL', '')
+      if not webhook:
+          print('No SLACK_WEBHOOK_URL set — skipping notification')
+          exit(0)
+
+      version = os.environ.get('VERSION', 'unknown')
+      env_name = os.environ.get('DEPLOY_ENV', 'production')
+      pipeline_url = os.environ.get('CI_PIPELINE_URL', '')
+      triggered_by = os.environ.get('GITLAB_USER_NAME', 'CI')
+
+      payload = {
+          'blocks': [
+              {
+                  'type': 'header',
+                  'text': {'type': 'plain_text', 'text': f'Release {version} deployed to {env_name}'}
+              },
+              {
+                  'type': 'section',
+                  'fields': [
+                      {'type': 'mrkdwn', 'text': f'*Version:* {version}'},
+                      {'type': 'mrkdwn', 'text': f'*Environment:* {env_name}'},
+                      {'type': 'mrkdwn', 'text': f'*Triggered by:* {triggered_by}'},
+                      {'type': 'mrkdwn', 'text': f'*Pipeline:* <{pipeline_url}|View Pipeline>'},
+                  ]
+              },
+              {
+                  'type': 'actions',
+                  'elements': [
+                      {
+                          'type': 'button',
+                          'text': {'type': 'plain_text', 'text': 'View Release Notes'},
+                          'url': f'{pipeline_url}/artifacts/browse'
+                      }
+                  ]
+              }
+          ]
+      }
+
+      resp = requests.post(webhook, json=payload, timeout=10)
+      print(f'Slack notification sent: {resp.status_code}')
+      "
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Slack: QA Handoff ────────────────────────────────────────────────────────
+
+.notify_qa_handoff_slack:
+  extends: .notify_base
+  stage: qa-bridge
+  script:
+    - |
+      python -c "
+      import requests, os, json
+
+      webhook = os.environ.get('SLACK_WEBHOOK_URL', '')
+      if not webhook:
+          print('No SLACK_WEBHOOK_URL set — skipping')
+          exit(0)
+
+      version = os.environ.get('VERSION', 'unknown')
+      pipeline_url = os.environ.get('CI_PIPELINE_URL', '')
+
+      payload = {
+          'blocks': [
+              {
+                  'type': 'header',
+                  'text': {'type': 'plain_text', 'text': f'QA Handoff Ready: {version}'}
+              },
+              {
+                  'type': 'section',
+                  'text': {
+                      'type': 'mrkdwn',
+                      'text': f'Release *{version}* is ready for QA validation.\n'
+                              f'Test manifest and QA checklist are available as pipeline artifacts.'
+                  }
+              },
+              {
+                  'type': 'actions',
+                  'elements': [
+                      {
+                          'type': 'button',
+                          'text': {'type': 'plain_text', 'text': 'View QA Artifacts'},
+                          'url': f'{pipeline_url}/artifacts/browse'
+                      },
+                      {
+                          'type': 'button',
+                          'text': {'type': 'plain_text', 'text': 'View Pipeline'},
+                          'url': pipeline_url
+                      }
+                  ]
+              }
+          ]
+      }
+
+      resp = requests.post(webhook, json=payload, timeout=10)
+      print(f'QA notification sent: {resp.status_code}')
+      "
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Teams: Release Deployed ──────────────────────────────────────────────────
+
+.notify_release_teams:
+  extends: .notify_base
+  stage: notify
+  script:
+    - |
+      python -c "
+      import requests, os
+
+      webhook = os.environ.get('TEAMS_WEBHOOK_URL', '')
+      if not webhook:
+          print('No TEAMS_WEBHOOK_URL set — skipping')
+          exit(0)
+
+      version = os.environ.get('VERSION', 'unknown')
+      env_name = os.environ.get('DEPLOY_ENV', 'production')
+      pipeline_url = os.environ.get('CI_PIPELINE_URL', '')
+
+      payload = {
+          'type': 'message',
+          'attachments': [{
+              'contentType': 'application/vnd.microsoft.card.adaptive',
+              'content': {
+                  'type': 'AdaptiveCard',
+                  'version': '1.4',
+                  'body': [
+                      {'type': 'TextBlock', 'size': 'Large', 'weight': 'Bolder',
+                       'text': f'Release {version} → {env_name}'},
+                      {'type': 'FactSet', 'facts': [
+                          {'title': 'Version', 'value': version},
+                          {'title': 'Environment', 'value': env_name},
+                      ]},
+                  ],
+                  'actions': [
+                      {'type': 'Action.OpenUrl', 'title': 'View Pipeline', 'url': pipeline_url}
+                  ]
+              }
+          }]
+      }
+
+      resp = requests.post(webhook, json=payload, timeout=10)
+      print(f'Teams notification sent: {resp.status_code}')
+      "
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

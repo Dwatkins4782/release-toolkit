@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env.local
+
+# Pip cache
+.pip-cache/
+
+# Test / Coverage
+.pytest_cache/
+htmlcov/
+.coverage
+test-results.xml
+coverage.xml
+
+# Artifacts
+version-summary.json
+version.env
+release-notes*.md
+release-notes*.json
+release-report*.md
+tagged-items.json
+qa-artifacts/
+correlation-report.json
+gitleaks-report.json
+CHANGELOG.md
+
+# Kubernetes
+*.kubeconfig
+kubeconfig-*
