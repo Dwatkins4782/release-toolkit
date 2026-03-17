@@ -179,6 +179,8 @@ make validate-configs     # Validate YAML configurations
 
 ## Documentation
 
+- [Kick the Tires](docs/KICK-THE-TIRES.md) — Hands-on quick start (try every script in 30 minutes)
+- [Script Reference](docs/SCRIPT-REFERENCE.md) — Detailed breakdown of every script with use cases
 - [Integration Guide](docs/INTEGRATION.md) — Adding release-toolkit to existing projects
 - [Runbook](docs/RUNBOOK.md) — Operational runbook for rollout events
 - [Architecture](docs/ARCHITECTURE.md) — System architecture and data flow
